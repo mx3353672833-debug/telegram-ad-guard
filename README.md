@@ -1,6 +1,6 @@
 # Telegram Ad Guard — customized build
 
-This build implements one AI-detected advertisement per user per rolling hour, deletion plus a one-hour mute for over-quota ads, a permanent mute on the third over-quota violation within a rolling seven-day window, and per-group administrator-managed blocked words. It is preconfigured for Kimi Code `k3`.
+This build defaults to deterministic, per-group keyword moderation with no AI API required. Blocked words delete the message and permanently mute the sender; ad words use a one-per-user rolling-hour quota, a one-hour mute for over-quota ads, and a permanent mute on the third rolling-seven-day violation. Permanent mutes include an in-group appeal flow.
 
 See [使用说明.md](使用说明.md) for the Chinese setup and group installation guide.
 
@@ -42,7 +42,11 @@ See [使用说明.md](使用说明.md) for the Chinese setup and group installat
 
 ## ✨ Features
 
-- 🛡️ **Smart Detection**: AI-powered spam detection for text, images, and stickers
+- 🛡️ **No-AI Keyword Mode**: Deterministic moderation without API cost or model errors
+- 📢 **Per-group Ad Words**: One matched ad per user per rolling hour
+- ⛔ **Per-group Blocked Words**: Immediate deletion and permanent mute
+- 📨 **Appeals**: Muted users can submit an in-group appeal for admin approval
+- 🔨 **Manual Moderation**: Admin `/mute` and `/unban` commands
 - 📝 **Visible-Content Checks**: Image captions and quoted snippets are included in moderation
 - 🔁 **Reply & Forward Coverage**: Reply content and forwarded visible content are included in extraction
 - 🎯 **Multi-Model Support**: Choose from Kimi, OpenAI, Qwen, or DeepSeek
@@ -73,10 +77,11 @@ cp config.example.yml config.yml
 # Edit config.yml with your settings
 ```
 
-**Required:**
+**Required in the default `keywords` mode:**
 - `telegram.token` - Your bot token (from [@BotFather](https://t.me/BotFather))
-- `telegram.owners` - Super admin ID (your Telegram ID, get it from [@userinfobot](https://t.me/userinfobot))
-- AI model config (choose one):
+- `telegram.owners` - Optional super admin ID
+
+AI keys are only required when `detection.mode: "ai"`:
   - `openai.api_key` - OpenAI API Key
   - `qwen.api_key` - Qwen API Key
   - `deepseek.api_key` - DeepSeek API Key
@@ -105,6 +110,11 @@ python bot.py
 
 - `/unban <user_id>` - Unban user
 - `/unban` (reply to message) - Unban the replied user
+- `/mute <user_id>` - Permanently mute a user
+- `/mute` (reply to message) - Permanently mute the replied user
+- `/add_adword <word or phrase>` - Add an hourly-quota ad phrase
+- `/del_adword <word or phrase>` - Remove an ad phrase
+- `/adwords` - List ad phrases for the current group
 - `/add_blockword <word or phrase>` - Add a blocked phrase for the current group
 - `/del_blockword <word or phrase>` - Remove a blocked phrase for the current group
 - `/blockwords` - List blocked phrases for the current group
@@ -137,7 +147,14 @@ telegram:
 language: "zh"  # Options: zh / en
 ```
 
-### AI Model Selection
+### Detection Mode
+
+```yaml
+detection:
+  mode: "keywords"  # No AI API required; use "ai" for optional model detection
+```
+
+### Optional AI Model Selection
 
 ```yaml
 ai_model: "kimi"  # Options: kimi / openai / qwen / deepseek

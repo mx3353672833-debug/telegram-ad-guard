@@ -64,6 +64,7 @@ class Database:
         self._local = threading.local()
         self._write_lock = threading.RLock()
         self._blocked_words_cache: dict[int, list[tuple[str, str]]] = {}
+        self._ad_words_cache: dict[int, list[tuple[str, str]]] = {}
         self._init_tables()
 
     def _get_conn(self):
@@ -135,6 +136,16 @@ class Database:
             # 每个群独立的手动屏蔽词。normalized_word 用于大小写和全半角兼容匹配。
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS blocked_words (
+                    chat_id INTEGER NOT NULL,
+                    word TEXT NOT NULL,
+                    normalized_word TEXT NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, normalized_word)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ad_words (
                     chat_id INTEGER NOT NULL,
                     word TEXT NOT NULL,
                     normalized_word TEXT NOT NULL,
@@ -377,7 +388,12 @@ class Database:
 
     @staticmethod
     def normalize_blocked_text(value: str) -> str:
-        return unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        # 去掉零宽等 Unicode 格式字符，防止通过插入不可见字符绕过。
+        return "".join(
+            character for character in normalized
+            if unicodedata.category(character) != "Cf"
+        ).strip()
 
     def add_blocked_word(self, chat_id: int, word: str, created_by: int) -> bool:
         word = str(word or "").strip()
@@ -445,6 +461,78 @@ class Database:
         if not normalized_text:
             return None
         for original, normalized_word in self._blocked_word_pairs(chat_id):
+            if normalized_word in normalized_text:
+                return original
+        return None
+
+    # ============ 手动广告词 ============
+
+    def add_ad_word(self, chat_id: int, word: str, created_by: int) -> bool:
+        word = str(word or "").strip()
+        normalized = self.normalize_blocked_text(word)
+        if not normalized:
+            raise ValueError("ad word cannot be empty")
+        if len(word) > 64:
+            raise ValueError("ad word is too long")
+
+        with self._write_lock, self._get_cursor() as cur:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO ad_words
+                    (chat_id, word, normalized_word, created_by)
+                VALUES (?, ?, ?, ?)
+                """,
+                (chat_id, word, normalized, created_by),
+            )
+            inserted = cur.rowcount > 0
+        self._ad_words_cache.pop(chat_id, None)
+        return inserted
+
+    def remove_ad_word(self, chat_id: int, word: str) -> bool:
+        normalized = self.normalize_blocked_text(word)
+        if not normalized:
+            return False
+        with self._write_lock, self._get_cursor() as cur:
+            cur.execute(
+                "DELETE FROM ad_words WHERE chat_id=? AND normalized_word=?",
+                (chat_id, normalized),
+            )
+            removed = cur.rowcount > 0
+        self._ad_words_cache.pop(chat_id, None)
+        return removed
+
+    def list_ad_words(self, chat_id: int) -> List[str]:
+        with self._get_cursor() as cur:
+            cur.execute(
+                """
+                SELECT word FROM ad_words
+                WHERE chat_id=? ORDER BY created_at, word
+                """,
+                (chat_id,),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def _ad_word_pairs(self, chat_id: int) -> list[tuple[str, str]]:
+        cached = self._ad_words_cache.get(chat_id)
+        if cached is not None:
+            return cached
+        with self._get_cursor() as cur:
+            cur.execute(
+                """
+                SELECT word, normalized_word FROM ad_words
+                WHERE chat_id=? ORDER BY LENGTH(normalized_word) DESC
+                """,
+                (chat_id,),
+            )
+            pairs = [(row[0], row[1]) for row in cur.fetchall()]
+        self._ad_words_cache[chat_id] = pairs
+        return pairs
+
+    def find_ad_word(self, chat_id: int, text: str) -> Optional[str]:
+        normalized_text = self.normalize_blocked_text(text)
+        if not normalized_text:
+            return None
+        for original, normalized_word in self._ad_word_pairs(chat_id):
             if normalized_word in normalized_text:
                 return original
         return None

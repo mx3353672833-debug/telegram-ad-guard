@@ -18,6 +18,7 @@ import logging
 import sys
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from telegram import Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -25,8 +26,6 @@ from telegram.ext import (
 )
 from config import config
 from database import db, UserInfo
-from ai import create_ai_client
-from ai.prompts import USER_INFO_TEMPLATE
 from developer_info import get_start_message
 from i18n import t, set_locale
 from message_utils import extract_message_text
@@ -69,7 +68,17 @@ PROJECT_INFO = {
     'demo_bot': '@xiaolangzaibot'
 }
 
-ai_client = create_ai_client()
+def detection_mode() -> str:
+    return str(config.get("detection.mode", "ai")).strip().lower()
+
+
+def create_configured_ai_client():
+    from ai import create_ai_client
+
+    return create_ai_client()
+
+
+ai_client = create_configured_ai_client() if detection_mode() == "ai" else None
 
 # ============ 工具函数 ============
 
@@ -170,21 +179,37 @@ def normal_member_permissions():
     )
 
 
-async def delete_if_blocked_word(message, chat_id: int) -> bool:
-    """命中本群手动屏蔽词时直接删除，不计入广告处罚。"""
-    body = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
-    matched = db.find_blocked_word(chat_id, body)
-    if not matched:
-        return False
+def current_message_body(message) -> str:
+    """只返回当前消息的文本/说明，避免引用内容误伤发言者。"""
+    return (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+
+
+def permanent_mute_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📨 本人发起申诉", callback_data=f"appeal_{user_id}")],
+        [InlineKeyboardButton("🔓 管理员解除禁言", callback_data=f"unban_{user_id}")],
+    ])
+
+
+async def send_permanent_mute_notice(context, chat_id: int, user, reason: str):
+    safe_name = html.escape(getattr(user, "full_name", None) or str(user.id))
+    notice = (
+        f'🚫 <a href="tg://user?id={user.id}">{safe_name}</a> 已被<b>永久禁言</b>。\n'
+        f"原因：{html.escape(reason)}\n"
+        "如需申诉，由被禁言者本人点击下方按钮。"
+    )
+    await context.bot.send_message(
+        chat_id,
+        notice,
+        parse_mode="HTML",
+        reply_markup=permanent_mute_keyboard(user.id),
+    )
+
+
+async def enforce_blocked_word(message, chat_id: int, user, context, matched: str) -> None:
+    """屏蔽词优先级最高：删除原消息并永久禁言。"""
     try:
         await message.delete()
-        logger.info(
-            "Blocked-word message deleted: chat=%s user=%s word=%r message=%s",
-            chat_id,
-            getattr(getattr(message, "from_user", None), "id", None),
-            matched,
-            message.message_id,
-        )
     except Exception as exc:
         logger.warning(
             "Failed to delete blocked-word message: chat=%s message=%s error=%s",
@@ -192,10 +217,25 @@ async def delete_if_blocked_word(message, chat_id: int) -> bool:
             message.message_id,
             exc,
         )
-    return True
+    await context.bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=user.id,
+        permissions=no_send_permissions(),
+        until_date=None,
+    )
+    await send_permanent_mute_notice(context, chat_id, user, f"命中本群屏蔽词：{matched}")
+    logger.info(
+        "Blocked-word permanent mute: chat=%s user=%s word=%r message=%s",
+        chat_id,
+        user.id,
+        matched,
+        message.message_id,
+    )
 
 def build_user_info(user, db_user: UserInfo) -> str:
     """构建用户信息字符串（不包含用户名称，避免因名称误判）"""
+    from ai.prompts import USER_INFO_TEMPLATE
+
     return USER_INFO_TEMPLATE.format(
         msg_count=db_user.message_count + 1,
         join_time=db_user.join_time.strftime("%Y-%m-%d %H:%M")
@@ -242,7 +282,7 @@ def create_ban_keyboard() -> InlineKeyboardMarkup:
 async def send_policy_notice(context, chat_id: int, user, result, decision, temporary_minutes: int):
     """发送简洁、可申诉的额度违规通知。"""
     safe_name = html.escape(user.full_name or str(user.id))
-    safe_reason = html.escape(getattr(result, "reason", "") or "AI 判定为广告")
+    safe_reason = html.escape(getattr(result, "reason", "") or "命中广告词")
     if decision.is_permanent:
         action_text = "永久禁言"
     else:
@@ -254,19 +294,23 @@ async def send_policy_notice(context, chat_id: int, user, result, decision, temp
         f"最近统计周期内违规：<b>{decision.violation_count}</b> 次。\n"
         f"识别原因：{safe_reason}"
     )
-    buttons = [[InlineKeyboardButton("管理员解除并清除记录", callback_data=f"unban_{user.id}")]]
+    if decision.is_permanent:
+        buttons = permanent_mute_keyboard(user.id).inline_keyboard
+    else:
+        buttons = [[InlineKeyboardButton("管理员解除并清除记录", callback_data=f"unban_{user.id}")]]
     sent_message = await context.bot.send_message(
         chat_id,
         notice,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
-    delete_after = int(config.get("message.delete_policy_notice_after_seconds", 60))
-    schedule_message_deletion(context, chat_id, sent_message.message_id, delete_after, "policy notice")
+    if not decision.is_permanent:
+        delete_after = int(config.get("message.delete_policy_notice_after_seconds", 60))
+        schedule_message_deletion(context, chat_id, sent_message.message_id, delete_after, "policy notice")
 
 
 async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, message, result):
-    """对 AI 已确认的广告执行一小时额度及滚动七天处罚。"""
+    """对已确认的广告执行一小时额度及滚动七天处罚。"""
     settings = policy_settings()
     decision = db.register_detected_ad(
         chat_id=chat_id,
@@ -307,6 +351,33 @@ async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
     return decision.action
 
 
+async def apply_word_rules(context, chat_id: int, user, message):
+    """按屏蔽词 > 广告词的优先级处理当前消息。"""
+    body = current_message_body(message)
+    if not body:
+        return None
+
+    blocked_word = db.find_blocked_word(chat_id, body)
+    if blocked_word:
+        await enforce_blocked_word(message, chat_id, user, context, blocked_word)
+        stats.record_check("banned")
+        return "blocked_permanent_mute"
+
+    ad_word = db.find_ad_word(chat_id, body)
+    if ad_word:
+        result = SimpleNamespace(
+            is_spam=True,
+            score=100,
+            reason=f"命中本群广告词：{ad_word}",
+            mock_text="",
+        )
+        action = await apply_ad_policy(context, chat_id, user, message, result)
+        stats.record_check("passed" if action == "allowed_ad" else "banned")
+        return action
+
+    return None
+
+
 # ============ 消息处理 ============
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,7 +394,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_chat_admin(chat_id, user.id, context):
         return
 
-    if await delete_if_blocked_word(message, chat_id):
+    word_action = await apply_word_rules(context, chat_id, user, message)
+    if word_action:
+        return
+    if detection_mode() != "ai":
         return
 
     db_user = db.get_user(user.id, chat_id)
@@ -377,7 +451,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_chat_admin(chat_id, user.id, context):
         return
 
-    if await delete_if_blocked_word(message, chat_id):
+    word_action = await apply_word_rules(context, chat_id, user, message)
+    if word_action:
+        return
+    if detection_mode() != "ai":
         return
 
     db_user = db.get_user(user.id, chat_id)
@@ -439,6 +516,9 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if await is_chat_admin(chat_id, user.id, context):
+        return
+
+    if detection_mode() != "ai":
         return
 
     db_user = db.get_user(user.id, chat_id)
@@ -632,8 +712,9 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         "⚙️ 广告限额管理\n\n"
-        f"AI 模型：{config.get('ai_model', 'unknown')}\n"
-        f"广告阈值：{config.get('strategy.spam_score', 80)} 分\n"
+        f"识别模式：{'AI' if detection_mode() == 'ai' else '关键词（不调用 AI）'}\n"
+        f"本群广告词：{len(db.list_ad_words(chat_id))} 个\n"
+        f"本群屏蔽词：{len(db.list_blocked_words(chat_id))} 个\n"
         f"每人每 {config.get('policy.ad_interval_minutes', 60)} 分钟允许 1 条广告\n"
         f"超额后禁言：{config.get('policy.temporary_mute_minutes', 60)} 分钟\n"
         f"滚动 {config.get('policy.violation_window_days', 7)} 天内达到 "
@@ -641,7 +722,11 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "管理员命令：\n"
         "• /ad_status — 回复成员消息查看状态\n"
         "• /reset_ad_history — 回复成员消息清除记录并解除禁言\n"
+        "• /mute — 回复成员消息永久禁言\n"
         "• /unban — 回复成员消息解除禁言并清除记录\n"
+        "• /add_adword <词或短语> — 添加本群广告词\n"
+        "• /del_adword <词或短语> — 解除本群广告词\n"
+        "• /adwords — 查看本群广告词\n"
         "• /add_blockword <词或短语> — 添加本群屏蔽词\n"
         "• /del_blockword <词或短语> — 解除本群屏蔽词\n"
         "• /blockwords — 查看本群屏蔽词"
@@ -658,6 +743,46 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text(render_stats_panel(stats.get_stats(), t))
+
+
+async def handle_appeal_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """被永久禁言者本人提交申诉，由群管理员决定是否解除。"""
+    query = update.callback_query
+    await query.answer()
+    try:
+        target_user_id = int(query.data.removeprefix("appeal_"))
+    except (TypeError, ValueError):
+        return
+
+    if query.from_user.id != target_user_id:
+        await query.answer("只有被禁言者本人可以发起申诉", show_alert=True)
+        return
+
+    chat_id = query.message.chat_id
+    safe_name = html.escape(query.from_user.full_name or str(target_user_id))
+    await context.bot.send_message(
+        chat_id,
+        (
+            f'📨 <a href="tg://user?id={target_user_id}">{safe_name}</a> 已提交解除禁言申诉。\n'
+            "请群管理员审核；同意时点击下方按钮。"
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ 同意申诉并解除禁言", callback_data=f"unban_{target_user_id}")
+        ]]),
+    )
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ 申诉已提交", callback_data=f"appealed_{target_user_id}")
+            ]])
+        )
+    except Exception as exc:
+        logger.warning("Failed to mark appeal button submitted: %s", exc)
+
+
+async def handle_appealed_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("申诉已经提交，请等待管理员处理", show_alert=True)
 
 async def handle_unban_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理解除禁言按钮点击"""
@@ -716,6 +841,45 @@ async def handle_unban_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await query.answer(t('unban_failed', error=str(e)), show_alert=True)
         logger.error(f"Failed to unmute user {target_user_id}: {e}")
+
+
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """群管理员手动永久禁言：回复成员消息或使用 /mute <用户ID>。"""
+    chat_id = update.effective_chat.id
+    if not await _require_group_admin(update, context):
+        return
+    try:
+        target_user_id, target_user_name = resolve_unban_target(
+            update.message.reply_to_message,
+            context.args or [],
+        )
+    except CommandInputError:
+        await update.message.reply_text("用法：回复成员消息发送 /mute，或使用 /mute <用户ID>")
+        return
+
+    if await is_chat_admin(chat_id, target_user_id, context):
+        await update.message.reply_text("❌ 不能禁言群管理员")
+        return
+
+    await context.bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=target_user_id,
+        permissions=no_send_permissions(),
+        until_date=None,
+    )
+    target_user = getattr(update.message.reply_to_message, "from_user", None)
+    if target_user is None:
+        target_user = type("MuteTarget", (), {
+            "id": target_user_id,
+            "full_name": target_user_name or str(target_user_id),
+        })()
+    await send_permanent_mute_notice(context, chat_id, target_user, "群管理员手动禁言")
+    logger.info(
+        "Manual permanent mute: chat=%s target=%s admin=%s",
+        chat_id,
+        target_user_id,
+        update.effective_user.id,
+    )
 
 async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /unban 命令"""
@@ -896,6 +1060,55 @@ async def cmd_blockwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["本群屏蔽词："] + [f"{index}. {word}" for index, word in enumerate(words, 1)]
     await update.message.reply_text("\n".join(lines))
 
+
+async def cmd_add_adword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """添加本群广告词或短语。"""
+    if not await _require_group_admin(update, context):
+        return
+    word = " ".join(context.args or []).strip()
+    if not word:
+        await update.message.reply_text("用法：/add_adword <词或短语>")
+        return
+    try:
+        inserted = db.add_ad_word(
+            update.effective_chat.id,
+            word,
+            update.effective_user.id,
+        )
+    except ValueError as exc:
+        await update.message.reply_text(f"❌ 添加失败：{exc}")
+        return
+    if inserted:
+        await update.message.reply_text(f"✅ 已添加本群广告词：{word}")
+    else:
+        await update.message.reply_text(f"ℹ️ 本群已存在该广告词：{word}")
+
+
+async def cmd_del_adword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """解除本群广告词。"""
+    if not await _require_group_admin(update, context):
+        return
+    word = " ".join(context.args or []).strip()
+    if not word:
+        await update.message.reply_text("用法：/del_adword <词或短语>")
+        return
+    if db.remove_ad_word(update.effective_chat.id, word):
+        await update.message.reply_text(f"✅ 已解除本群广告词：{word}")
+    else:
+        await update.message.reply_text(f"ℹ️ 没有找到该广告词：{word}")
+
+
+async def cmd_adwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看本群全部广告词。"""
+    if not await _require_group_admin(update, context):
+        return
+    words = db.list_ad_words(update.effective_chat.id)
+    if not words:
+        await update.message.reply_text("本群暂未设置广告词。")
+        return
+    lines = ["本群广告词："] + [f"{index}. {word}" for index, word in enumerate(words, 1)]
+    await update.message.reply_text("\n".join(lines))
+
 # ============ 启动 ============
 
 def validate_config():
@@ -907,27 +1120,30 @@ def validate_config():
     if not token or "replace-with" in str(token):
         errors.append("❌ telegram.token 未配置")
     
-    # 检查 AI 模型配置
-    ai_model = config.get("ai_model", "openai")
-    if ai_model == "openai":
-        if not config.get("openai.api_key") or "replace-with" in str(config.get("openai.api_key")):
-            errors.append("❌ openai.api_key 未配置")
-    elif ai_model == "qwen":
-        if not config.get("qwen.api_key") or "replace-with" in str(config.get("qwen.api_key")):
-            errors.append("❌ qwen.api_key 未配置")
-    elif ai_model == "deepseek":
-        if not config.get("deepseek.api_key") or "replace-with" in str(config.get("deepseek.api_key")):
-            errors.append("❌ deepseek.api_key 未配置")
-    elif ai_model == "kimi":
-        if not config.get("kimi.api_key") or "replace-with" in str(config.get("kimi.api_key")):
-            errors.append("❌ kimi.api_key 未配置")
-    else:
-        errors.append(f"❌ 不支持的 AI 模型: {ai_model}")
+    mode = detection_mode()
+    if mode not in {"keywords", "ai"}:
+        errors.append("❌ detection.mode 只能是 keywords 或 ai")
+    if mode == "ai":
+        ai_model = config.get("ai_model", "openai")
+        if ai_model == "openai":
+            if not config.get("openai.api_key") or "replace-with" in str(config.get("openai.api_key")):
+                errors.append("❌ openai.api_key 未配置")
+        elif ai_model == "qwen":
+            if not config.get("qwen.api_key") or "replace-with" in str(config.get("qwen.api_key")):
+                errors.append("❌ qwen.api_key 未配置")
+        elif ai_model == "deepseek":
+            if not config.get("deepseek.api_key") or "replace-with" in str(config.get("deepseek.api_key")):
+                errors.append("❌ deepseek.api_key 未配置")
+        elif ai_model == "kimi":
+            if not config.get("kimi.api_key") or "replace-with" in str(config.get("kimi.api_key")):
+                errors.append("❌ kimi.api_key 未配置")
+        else:
+            errors.append(f"❌ 不支持的 AI 模型: {ai_model}")
     
     # 检查超级管理员
     owners = config.get("telegram.owners", [])
     if not owners:
-        logger.warning("⚠️ telegram.owners 未配置，广告管理功能将无法使用")
+        logger.warning("⚠️ telegram.owners 未配置；群管理命令正常，仅 /stats 等超级管理命令不可用")
 
     numeric_policy = {
         "policy.ad_interval_minutes": config.get("policy.ad_interval_minutes", 60),
@@ -979,14 +1195,17 @@ def main():
     
     token = config.get("telegram.token")
     
-    # 初始化 AI 客户端（带错误处理）
-    try:
-        global ai_client
-        ai_client = create_ai_client()
-        logger.info(f"✅ AI 客户端初始化成功: {config.get('ai_model')}")
-    except Exception as e:
-        logger.error(f"❌ AI 客户端初始化失败: {e}")
-        sys.exit(1)
+    global ai_client
+    if detection_mode() == "ai":
+        try:
+            ai_client = create_configured_ai_client()
+            logger.info(f"✅ AI 客户端初始化成功: {config.get('ai_model')}")
+        except Exception as e:
+            logger.error(f"❌ AI 客户端初始化失败: {e}")
+            sys.exit(1)
+    else:
+        ai_client = None
+        logger.info("✅ 关键词模式已启用，不调用 AI API")
 
     import os
     api_url = os.getenv("TELEGRAM_API_URL")
@@ -1002,29 +1221,37 @@ def main():
     # 注册处理器
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("ad_status", cmd_ad_status))
     app.add_handler(CommandHandler("reset_ad_history", cmd_reset_ad_history))
     app.add_handler(CommandHandler("add_blockword", cmd_add_blockword))
     app.add_handler(CommandHandler("del_blockword", cmd_del_blockword))
     app.add_handler(CommandHandler("blockwords", cmd_blockwords))
+    app.add_handler(CommandHandler("add_adword", cmd_add_adword))
+    app.add_handler(CommandHandler("del_adword", cmd_del_adword))
+    app.add_handler(CommandHandler("adwords", cmd_adwords))
     app.add_handler(CommandHandler("stats", cmd_stats))
-    
+
+    # 未知命令也要进入审核，避免用 /x 前缀绕过词库。
+    app.add_handler(MessageHandler(filters.COMMAND, handle_text))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND & ~filters.PHOTO, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(ChatMemberHandler(handle_bot_added_to_group, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_unban_button, pattern="^unban_"))
+    app.add_handler(CallbackQueryHandler(handle_appeal_button, pattern="^appeal_"))
+    app.add_handler(CallbackQueryHandler(handle_appealed_button, pattern="^appealed_"))
 
     logger.info("🚀 Bot 启动中...")
     logger.info(
-        "📊 广告策略: 每%s分钟1条 | 超额禁言%s分钟 | %s天内%s次永久禁言 | AI阈值%s",
+        "📊 广告策略: 模式=%s | 每%s分钟1条 | 超额禁言%s分钟 | %s天内%s次永久禁言",
+        detection_mode(),
         config.get('policy.ad_interval_minutes', 60),
         config.get('policy.temporary_mute_minutes', 60),
         config.get('policy.violation_window_days', 7),
         config.get('policy.permanent_mute_after', 3),
-        config.get('strategy.spam_score', 80),
     )
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

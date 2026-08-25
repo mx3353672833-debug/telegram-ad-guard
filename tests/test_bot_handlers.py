@@ -65,7 +65,9 @@ class FakeDB:
         self.incremented_verifications = []
         self.cleared_history = []
         self.blocked_word_match = None
+        self.ad_word_match = None
         self.blocked_words = {}
+        self.ad_words = {}
 
     def get_user(self, user_id, chat_id):
         return self.user
@@ -87,6 +89,9 @@ class FakeDB:
     def find_blocked_word(self, chat_id, text):
         return self.blocked_word_match
 
+    def find_ad_word(self, chat_id, text):
+        return self.ad_word_match
+
     def add_blocked_word(self, chat_id, word, created_by):
         words = self.blocked_words.setdefault(chat_id, [])
         if word in words:
@@ -104,6 +109,23 @@ class FakeDB:
     def list_blocked_words(self, chat_id):
         return list(self.blocked_words.get(chat_id, []))
 
+    def add_ad_word(self, chat_id, word, created_by):
+        words = self.ad_words.setdefault(chat_id, [])
+        if word in words:
+            return False
+        words.append(word)
+        return True
+
+    def remove_ad_word(self, chat_id, word):
+        words = self.ad_words.setdefault(chat_id, [])
+        if word not in words:
+            return False
+        words.remove(word)
+        return True
+
+    def list_ad_words(self, chat_id):
+        return list(self.ad_words.get(chat_id, []))
+
 
 class FakeQuery:
     def __init__(self, *, data, from_user, message):
@@ -111,9 +133,13 @@ class FakeQuery:
         self.from_user = from_user
         self.message = message
         self.answers = []
+        self.edited_reply_markup = None
 
     async def answer(self, text=None, show_alert=None):
         self.answers.append((text, show_alert))
+
+    async def edit_message_reply_markup(self, reply_markup=None):
+        self.edited_reply_markup = reply_markup
 
 
 class FakeLogger:
@@ -136,6 +162,7 @@ class FakeLogger:
 def bot_module(monkeypatch, tmp_path):
     values = {
         "ai_model": "openai",
+        "detection.mode": "ai",
         "openai.api_key": "test-key",
         "openai.base_url": "https://example.com/v1",
         "openai.model": "gpt-test",
@@ -154,6 +181,7 @@ def bot_module(monkeypatch, tmp_path):
     fake_config_module.config = SimpleNamespace(get=lambda key, default=None: values.get(key, default))
     fake_ai_module = ModuleType("ai")
     fake_ai_module.create_ai_client = lambda: SimpleNamespace()
+    fake_ai_module.SpamResult = lambda **kwargs: SimpleNamespace(**kwargs)
     fake_prompts_module = ModuleType("ai.prompts")
     fake_prompts_module.USER_INFO_TEMPLATE = "count={msg_count} joined={join_time}"
     fake_i18n_module = ModuleType("i18n")
@@ -437,6 +465,135 @@ def test_blockword_commands_are_scoped_to_current_group(bot_module, monkeypatch)
     assert message.replies[0][0] == "✅ 已添加本群屏蔽词：加我 私聊"
     assert "1. 加我 私聊" in message.replies[1][0]
     assert message.replies[2][0] == "✅ 已解除本群屏蔽词：加我 私聊"
+
+
+def test_blocked_word_has_priority_and_permanently_mutes(bot_module, monkeypatch):
+    fake_db = FakeDB()
+    fake_db.blocked_word_match = "无限开卡"
+    fake_db.ad_word_match = "开卡"
+    monkeypatch.setattr(bot_module, "db", fake_db)
+    stats_calls = []
+    monkeypatch.setattr(bot_module, "stats", SimpleNamespace(record_check=stats_calls.append))
+    fake_bot = FakeBot()
+    message = FakeMessage(chat_id=100)
+    message.from_user = SimpleNamespace(id=9, full_name="Blocked User")
+    message.text = "无限开卡"
+
+    action = asyncio.run(
+        bot_module.apply_word_rules(SimpleNamespace(bot=fake_bot), 100, message.from_user, message)
+    )
+
+    assert action == "blocked_permanent_mute"
+    assert message.deleted is True
+    assert fake_bot.restrict_calls[0]["until_date"] is None
+    assert len(fake_bot.send_calls) == 1
+    assert stats_calls == ["banned"]
+
+
+def test_ad_word_uses_hourly_ad_policy_without_ai(bot_module, monkeypatch):
+    fake_db = FakeDB()
+    fake_db.ad_word_match = "源头"
+    monkeypatch.setattr(bot_module, "db", fake_db)
+    stats_calls = []
+    monkeypatch.setattr(bot_module, "stats", SimpleNamespace(record_check=stats_calls.append))
+    captured = []
+
+    async def fake_policy(context, chat_id, user, message, result):
+        captured.append(result)
+        return "allowed_ad"
+
+    monkeypatch.setattr(bot_module, "apply_ad_policy", fake_policy)
+    message = FakeMessage(chat_id=100)
+    message.from_user = SimpleNamespace(id=10, full_name="Advertiser")
+    message.text = "AI 源头低价"
+
+    action = asyncio.run(
+        bot_module.apply_word_rules(SimpleNamespace(bot=FakeBot()), 100, message.from_user, message)
+    )
+
+    assert action == "allowed_ad"
+    assert captured[0].score == 100
+    assert "源头" in captured[0].reason
+    assert stats_calls == ["passed"]
+
+
+def test_adword_commands_are_scoped_to_current_group(bot_module, monkeypatch):
+    monkeypatch.setattr(bot_module, "is_chat_admin", _return_true)
+    fake_db = FakeDB()
+    monkeypatch.setattr(bot_module, "db", fake_db)
+    message = FakeMessage(chat_id=100)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=2),
+        effective_chat=SimpleNamespace(id=100, type="supergroup"),
+        message=message,
+    )
+
+    asyncio.run(bot_module.cmd_add_adword(update, SimpleNamespace(args=["AI", "源头"])))
+    asyncio.run(bot_module.cmd_adwords(update, SimpleNamespace(args=[])))
+    asyncio.run(bot_module.cmd_del_adword(update, SimpleNamespace(args=["AI", "源头"])))
+
+    assert fake_db.ad_words[100] == []
+    assert message.replies[0][0] == "✅ 已添加本群广告词：AI 源头"
+    assert "1. AI 源头" in message.replies[1][0]
+    assert message.replies[2][0] == "✅ 已解除本群广告词：AI 源头"
+
+
+def test_muted_user_can_submit_appeal(bot_module):
+    fake_bot = FakeBot()
+    query = FakeQuery(
+        data="appeal_123",
+        from_user=SimpleNamespace(id=123, full_name="Alice"),
+        message=FakeMessage(chat_id=100),
+    )
+
+    asyncio.run(
+        bot_module.handle_appeal_button(
+            SimpleNamespace(callback_query=query),
+            SimpleNamespace(bot=fake_bot),
+        )
+    )
+
+    assert len(fake_bot.send_calls) == 1
+    assert "已提交解除禁言申诉" in fake_bot.send_calls[0][1]
+    assert query.edited_reply_markup is not None
+
+
+def test_other_user_cannot_submit_someone_elses_appeal(bot_module):
+    fake_bot = FakeBot()
+    query = FakeQuery(
+        data="appeal_123",
+        from_user=SimpleNamespace(id=999, full_name="Other"),
+        message=FakeMessage(chat_id=100),
+    )
+
+    asyncio.run(
+        bot_module.handle_appeal_button(
+            SimpleNamespace(callback_query=query),
+            SimpleNamespace(bot=fake_bot),
+        )
+    )
+
+    assert fake_bot.send_calls == []
+    assert query.answers[-1] == ("只有被禁言者本人可以发起申诉", True)
+
+
+def test_admin_can_manually_permanently_mute_reply_target(bot_module, monkeypatch):
+    monkeypatch.setattr(bot_module, "_require_group_admin", _return_true)
+    monkeypatch.setattr(bot_module, "is_chat_admin", _return_false)
+    fake_bot = FakeBot()
+    target = SimpleNamespace(id=123, full_name="Alice", first_name="Alice")
+    message = FakeMessage(chat_id=100, reply_to_message=SimpleNamespace(from_user=target))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=2),
+        effective_chat=SimpleNamespace(id=100, type="supergroup"),
+        message=message,
+    )
+
+    asyncio.run(bot_module.cmd_mute(update, SimpleNamespace(args=[], bot=fake_bot)))
+
+    assert fake_bot.restrict_calls[0]["user_id"] == 123
+    assert fake_bot.restrict_calls[0]["until_date"] is None
+    assert len(fake_bot.send_calls) == 1
 
 
 def test_handle_text_creates_user_and_bans_spam(bot_module, monkeypatch):

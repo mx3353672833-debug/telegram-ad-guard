@@ -48,3 +48,35 @@ def test_invalid_blocked_words_are_rejected(tmp_path):
         db.add_blocked_word(100, "   ", 1)
     with pytest.raises(ValueError):
         db.add_blocked_word(100, "x" * 65, 1)
+
+
+def test_ad_words_have_independent_per_group_storage(tmp_path):
+    path = tmp_path / "words.db"
+    db = Database(path)
+
+    assert db.add_ad_word(100, "源头", 1) is True
+    assert db.add_ad_word(100, "源头", 1) is False
+    assert db.find_ad_word(100, "AI 源头批发") == "源头"
+    assert db.find_ad_word(200, "AI 源头批发") is None
+    assert db.list_ad_words(100) == ["源头"]
+
+    reopened = Database(path)
+    assert reopened.find_ad_word(100, "源头低价") == "源头"
+    assert reopened.remove_ad_word(100, "源头") is True
+    assert reopened.find_ad_word(100, "源头低价") is None
+
+
+def test_ad_word_matching_uses_nfkc_and_casefold(tmp_path):
+    db = Database(tmp_path / "words.db")
+    db.add_ad_word(100, "VCC１２３", 1)
+
+    assert db.find_ad_word(100, "vcc123 批发") == "VCC１２３"
+
+
+def test_invisible_format_characters_cannot_bypass_word_matching(tmp_path):
+    db = Database(tmp_path / "words.db")
+    db.add_blocked_word(100, "博彩", 1)
+    db.add_ad_word(100, "源头", 1)
+
+    assert db.find_blocked_word(100, "博\u200b彩推广") == "博彩"
+    assert db.find_ad_word(100, "源\u200d头低价") == "源头"
