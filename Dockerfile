@@ -8,12 +8,6 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# Refresh Debian packages on build so the runtime image picks up current
-# security fixes from the base distribution instead of shipping stale layers.
-RUN apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN python -m pip install --upgrade pip \
     && python -m pip install --upgrade setuptools \
     && python -m pip install -r requirements.txt \
