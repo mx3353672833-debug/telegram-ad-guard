@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    container_name: telegram-ad-guard
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./config.yml:/app/config.yml
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai

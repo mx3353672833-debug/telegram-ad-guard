@@ -1,0 +1,58 @@
+# Telegram 配置
+telegram:
+  token: ""                      # 推荐放在 .env 的 TELEGRAM_BOT_TOKEN
+  owners: ["123456789"]          # 机器人超级管理员 Telegram 数字 ID
+  whitelist_user_ids: []         # 不受广告限制的用户 ID；群管理员自动豁免
+  allow_any_group: false         # 安全起见默认只运行在下面指定的群
+  groups: ["-1001234567890"]     # 目标超级群 ID，可填写多个
+
+# 语言设置 (zh / en)
+language: "zh"
+
+# AI 模型选择: kimi / openai / qwen / deepseek
+ai_model: "kimi"
+
+# Kimi Code 配置（OpenAI 兼容接口）
+kimi:
+  api_key: ""                    # 推荐放在 .env 的 KIMI_API_KEY
+  base_url: "https://api.kimi.com/coding/v1"
+  model: "k3"
+
+# OpenAI 配置
+openai:
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+
+# 通义千问配置
+qwen:
+  api_key: ""                    # 推荐放在 .env 的 QWEN_API_KEY
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-vl-max"
+
+# DeepSeek 配置
+deepseek:
+  api_key: ""
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-chat"
+
+# 检测策略（增强版）
+strategy:
+  always_check: true          # 必须为 true：老成员也持续识别广告
+  spam_score: 80              # AI 广告评分阈值 (0-100)，建议 80-90
+
+# 广告额度与处罚。所有窗口均为滚动窗口，不按整点/自然周清零。
+policy:
+  ad_interval_minutes: 60     # 每人每群 60 分钟允许 1 条 AI 判定的广告
+  temporary_mute_minutes: 60  # 超额广告删除，并禁言 60 分钟
+  violation_window_days: 7    # 统计最近 7x24 小时的超额违规
+  permanent_mute_after: 3     # 统计窗口内第 3 次违规后永久禁言
+
+# 消息管理
+message:
+  delete_policy_notice_after_seconds: 60   # 违规通知自动删除，0=保留
+  delete_welcome_message_after_seconds: 30 # 欢迎消息自动删除秒数，0=不自动删除
+
+# 数据库
+database:
+  path: "data/bot.db"

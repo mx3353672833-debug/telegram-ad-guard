@@ -1,0 +1,136 @@
+# English Language Pack
+# AI Anti-Spam Bot
+
+# Common
+admin_only: "⚠️ Admin only"
+owner_only: "⚠️ Super admin only"
+group_only: "⚠️ This command can only be used in groups"
+no_permission: "⚠️ No permission"
+
+# Bot joins group
+welcome_message: |
+  👋 Hello! I've joined the group
+
+  🛡️ I'm an AI anti-spam bot developed by @luoyanglang, automatically detecting, deleting and banning spam users
+
+  ⚠️ Please set me as admin first
+  Required permissions:
+  • Delete messages
+  • Ban users
+
+  ✅ Once configured, I'll start protecting the group
+
+  💡 Admins can use /admin to view the control panel
+
+admin_promoted: |
+  ✅ Now I'm an admin!
+
+  🛡️ I'm now protecting the group, automatically detecting and banning spam users
+
+  💡 Admins can use /admin to view the control panel
+
+# Ban notice
+ban_notice: |
+  \#BanAlert
+  [{name}]({user_link}) Warning: Your username or message violates the rules
+  ⚠️ Identified as high-risk user by AI, permanently banned
+  Risk score: {score}
+  📋 Reason:
+  ```
+  {reason}
+  ```
+  🤖 AI roast:
+  ```
+  {mock}
+  ```
+
+# Button text
+btn_unban: "👮🏻 Unban"
+btn_channel: "📢 Channel"
+btn_group: "💬 Group"
+
+# Unban related
+unban_success: "✅ User unbanned"
+unban_success_detail: |
+  ✅ User unbanned
+
+  User: {name}
+  ID: {user_id}
+unban_success_id: |
+  ✅ User unbanned
+
+  User ID: {user_id}
+unban_failed: "❌ Unban failed: {error}"
+unban_usage: |
+  ⚠️ Please reply to the banned user's message
+
+  Or use: /unban <user_id>
+unban_invalid_id: "❌ Invalid user ID"
+unban_notice: "✅ Admin {admin} unbanned user [{user_id}](tg://user?id={user_id})"
+
+# /admin command
+admin_panel: |
+  ⚙️ Admin Panel
+
+  🤖 Current model: {model}
+  📊 Ban threshold: {score}
+  📅 Detection days: {days}
+  💬 Min messages: {messages}
+  ✅ Verification limit: {verification}
+
+  💡 Admin commands:
+  • /unban <user_id> - Unban user
+
+admin_panel_owner: |
+
+  🎯 Super admin commands:
+  • /add_ad - Add ad button
+  • /all_ad - View all ads
+  • /del_ad <ID> - Delete ad
+  • /stats - View statistics
+
+# /stats command
+stats_panel: |
+  📊 Statistics
+
+  ⏱️ Uptime: {hours}h {minutes}m
+  🔍 Total checks: {total}
+  ✅ Passed: {passed}
+  🚫 Banned: {banned}
+  ❌ Failed: {failed}
+
+stats_ban_rate: "\n📈 Ban rate: {rate}%"
+
+# Ad management
+ad_add_usage: |
+  📝 Add ad button
+
+  Format: /add_ad title|link|expiry|weight
+
+  Example:
+  /add_ad Official Channel|https://t.me/channel|2099-01-01 00:00:00|100
+
+  Notes:
+  • Higher weight = higher position
+  • Expiry format: YYYY-MM-DD HH:MM:SS
+ad_add_error_format: "❌ Format error, 4 parameters required"
+ad_add_success: "✅ Ad added! ID: {id}"
+ad_add_failed: "❌ Add failed: {error}"
+ad_list_empty: "📭 No ads"
+ad_list_header: "📋 All ads:\n\n"
+ad_list_item: |
+  ID: {id}
+  Title: {title}
+  URL: {url}
+  Weight: {sort}
+  Expiry: {validity}
+  Created: {created}
+  ---
+ad_delete_usage: "Format: /del_ad <ad_id>"
+ad_delete_success: "✅ Ad {id} deleted"
+ad_delete_failed: "❌ Delete failed: {error}"
+
+# Other
+unknown_user: "Unknown user"
+validity_permanent: "Permanent"
+validity_unknown: "Unknown"

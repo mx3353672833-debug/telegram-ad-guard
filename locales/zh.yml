@@ -1,0 +1,136 @@
+# 中文语言包
+# AI Anti-Spam Bot
+
+# 通用
+admin_only: "⚠️ 仅群管理员可用"
+owner_only: "⚠️ 仅超级管理员可用"
+group_only: "⚠️ 此命令只能在群组中使用"
+no_permission: "⚠️ 无权限"
+
+# Bot 加入群组
+welcome_message: |
+  👋 你好！我已加入群组
+
+  🛡️ 我是由狼哥 @luoyanglang 开发的 AI 反垃圾广告机器人，可以自动识别、删除并封禁发送垃圾广告的用户
+
+  ⚠️ 请先将我设为管理员
+  需要的权限：
+  • 删除消息
+  • 封禁用户
+
+  ✅ 设置完成后，我将自动开始保护群组
+
+  💡 管理员可使用 /admin 查看管理面板
+
+admin_promoted: |
+  ✅ 已成为管理员！
+
+  🛡️ 我现在开始保护群组，自动识别并封禁发送垃圾广告的用户
+
+  💡 管理员可使用 /admin 查看管理面板
+
+# 封禁通知
+ban_notice: |
+  \#封禁预警
+  [{name}]({user_link}) 请注意，你的用户名或发言存在违规
+  ⚠️已被AI判断为高风险用户，永久封禁
+  风险分数：{score}
+  📋 违规原因：
+  ```
+  {reason}
+  ```
+  🤖 AI 嘲讽：
+  ```
+  {mock}
+  ```
+
+# 按钮文本
+btn_unban: "👮🏻 解封"
+btn_channel: "📢 官方频道"
+btn_group: "💬 交流群组"
+
+# 解封相关
+unban_success: "✅ 已解除禁言"
+unban_success_detail: |
+  ✅ 已解除禁言
+
+  用户：{name}
+  ID：{user_id}
+unban_success_id: |
+  ✅ 已解除禁言
+
+  用户ID：{user_id}
+unban_failed: "❌ 解除禁言失败：{error}"
+unban_usage: |
+  ⚠️ 请回复被禁言用户的消息
+
+  或使用：/unban <用户ID>
+unban_invalid_id: "❌ 无效的用户ID"
+unban_notice: "✅ 管理员 {admin} 已解封用户 [{user_id}](tg://user?id={user_id})"
+
+# /admin 命令
+admin_panel: |
+  ⚙️ 管理面板
+
+  🤖 当前模型: {model}
+  📊 封禁阈值: {score}分
+  📅 检测天数: {days}天
+  💬 最少发言: {messages}条
+  ✅ 验证次数限制: {verification}
+
+  💡 管理命令：
+  • /unban <用户ID> - 解禁用户
+
+admin_panel_owner: |
+
+  🎯 超级管理员命令：
+  • /add_ad - 添加广告按钮
+  • /all_ad - 查看所有广告
+  • /del_ad <ID> - 删除广告
+  • /stats - 查看运行统计
+
+# /stats 命令
+stats_panel: |
+  📊 运行统计
+
+  ⏱️ 运行时长: {hours}小时 {minutes}分钟
+  🔍 总检测次数: {total}
+  ✅ 通过: {passed}
+  🚫 封禁: {banned}
+  ❌ 失败: {failed}
+
+stats_ban_rate: "\n📈 封禁率: {rate}%"
+
+# 广告管理
+ad_add_usage: |
+  📝 添加广告按钮
+
+  格式: /add_ad 标题|链接|过期时间|权重
+
+  示例:
+  /add_ad 官方频道|https://t.me/channel|2099-01-01 00:00:00|100
+
+  说明:
+  • 权重越大越靠前
+  • 过期时间格式: YYYY-MM-DD HH:MM:SS
+ad_add_error_format: "❌ 格式错误，需要4个参数"
+ad_add_success: "✅ 广告添加成功！ID: {id}"
+ad_add_failed: "❌ 添加失败: {error}"
+ad_list_empty: "📭 暂无广告"
+ad_list_header: "📋 所有广告：\n\n"
+ad_list_item: |
+  ID: {id}
+  标题: {title}
+  链接: {url}
+  权重: {sort}
+  过期: {validity}
+  创建: {created}
+  ---
+ad_delete_usage: "格式: /del_ad <广告ID>"
+ad_delete_success: "✅ 广告 {id} 已删除"
+ad_delete_failed: "❌ 删除失败: {error}"
+
+# 其他
+unknown_user: "未知用户"
+validity_permanent: "永久"
+validity_unknown: "未知"
