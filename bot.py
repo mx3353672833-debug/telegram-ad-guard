@@ -198,11 +198,19 @@ async def send_permanent_mute_notice(context, chat_id: int, user, reason: str):
         f"原因：{html.escape(reason)}\n"
         "如需申诉，由被禁言者本人点击下方按钮。"
     )
-    await context.bot.send_message(
+    sent_message = await context.bot.send_message(
         chat_id,
         notice,
         parse_mode="HTML",
         reply_markup=permanent_mute_keyboard(user.id),
+    )
+    delete_after = int(config.get("message.delete_permanent_mute_notice_after_seconds", 300))
+    schedule_message_deletion(
+        context,
+        chat_id,
+        sent_message.message_id,
+        delete_after,
+        "permanent mute notice",
     )
 
 

@@ -55,6 +55,7 @@ policy:
 # 消息管理
 message:
   delete_policy_notice_after_seconds: 60   # 违规通知自动删除，0=保留
+  delete_permanent_mute_notice_after_seconds: 300 # 永久禁言通知 5 分钟后删除
   delete_welcome_message_after_seconds: 30 # 欢迎消息自动删除秒数，0=不自动删除
 
 # 数据库

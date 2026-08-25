@@ -474,6 +474,14 @@ def test_blocked_word_has_priority_and_permanently_mutes(bot_module, monkeypatch
     monkeypatch.setattr(bot_module, "db", fake_db)
     stats_calls = []
     monkeypatch.setattr(bot_module, "stats", SimpleNamespace(record_check=stats_calls.append))
+    scheduled = []
+    monkeypatch.setattr(
+        bot_module,
+        "schedule_message_deletion",
+        lambda context, chat_id, message_id, delay_seconds, reason: scheduled.append(
+            (chat_id, message_id, delay_seconds, reason)
+        ),
+    )
     fake_bot = FakeBot()
     message = FakeMessage(chat_id=100)
     message.from_user = SimpleNamespace(id=9, full_name="Blocked User")
@@ -488,6 +496,7 @@ def test_blocked_word_has_priority_and_permanently_mutes(bot_module, monkeypatch
     assert fake_bot.restrict_calls[0]["until_date"] is None
     assert len(fake_bot.send_calls) == 1
     assert stats_calls == ["banned"]
+    assert scheduled == [(100, 901, 300, "permanent mute notice")]
 
 
 def test_ad_word_uses_hourly_ad_policy_without_ai(bot_module, monkeypatch):
