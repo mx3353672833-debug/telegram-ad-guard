@@ -49,6 +49,7 @@ strategy:
 policy:
   ad_interval_minutes: 60     # 每人每群 60 分钟允许 1 条广告
   temporary_mute_minutes: 60  # 超额广告删除，并禁言 60 分钟
+  duplicate_ad_mute_hours: 12 # 群内 60 分钟重复的相同广告固定禁言 12 小时，不计永久禁言次数
   violation_window_days: 7    # 统计最近 7x24 小时的超额违规
   permanent_mute_after: 3     # 统计窗口内第 3 次违规后永久禁言
 

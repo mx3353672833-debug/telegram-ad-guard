@@ -1035,3 +1035,91 @@ def test_apply_ad_policy_deletes_and_temporarily_mutes_violation(bot_module, mon
     assert message.deleted is True
     assert len(fake_bot.restrict_calls) == 1
     assert fake_bot.restrict_calls[0]["until_date"] is not None
+
+
+def test_apply_ad_policy_mutes_duplicate_for_twelve_hours(bot_module, monkeypatch):
+    decision = SimpleNamespace(
+        is_allowed=False,
+        is_permanent=False,
+        is_duplicate_content=True,
+        action="duplicate_mute",
+        violation_count=0,
+    )
+    monkeypatch.setattr(
+        bot_module,
+        "db",
+        SimpleNamespace(register_detected_ad=lambda **kwargs: decision),
+    )
+    monkeypatch.setattr(
+        bot_module,
+        "policy_settings",
+        lambda: {
+            "ad_interval": bot_module.timedelta(hours=1),
+            "violation_window": bot_module.timedelta(days=7),
+            "permanent_mute_after": 3,
+            "temporary_mute": bot_module.timedelta(hours=1),
+            "duplicate_mute": bot_module.timedelta(hours=12),
+        },
+    )
+
+    captured_minutes = []
+
+    async def fake_notice(context, chat_id, user, result, actual_decision, minutes):
+        captured_minutes.append(minutes)
+
+    monkeypatch.setattr(bot_module, "send_policy_notice", fake_notice)
+    message = FakeMessage(chat_id=100)
+    user = SimpleNamespace(id=88, full_name="Alice")
+    fake_bot = FakeBot()
+    before = datetime.now(bot_module.timezone.utc)
+
+    action = asyncio.run(
+        bot_module.apply_ad_policy(
+            SimpleNamespace(bot=fake_bot),
+            100,
+            user,
+            message,
+            SimpleNamespace(score=100, reason="相同广告"),
+        )
+    )
+
+    until_date = fake_bot.restrict_calls[0]["until_date"]
+    assert action == "duplicate_mute"
+    assert captured_minutes == [720]
+    assert bot_module.timedelta(hours=11, minutes=59) < until_date - before
+    assert until_date - before < bot_module.timedelta(hours=12, minutes=1)
+
+
+def test_permanent_policy_notice_is_deleted_after_five_minutes(bot_module, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(
+        bot_module,
+        "schedule_message_deletion",
+        lambda context, chat_id, message_id, delay_seconds, reason: scheduled.append(
+            (chat_id, message_id, delay_seconds, reason)
+        ),
+    )
+    monkeypatch.setattr(
+        bot_module,
+        "config",
+        SimpleNamespace(get=lambda key, default=None: default),
+    )
+    decision = SimpleNamespace(
+        is_permanent=True,
+        is_duplicate_content=False,
+        violation_count=3,
+    )
+    fake_bot = FakeBot()
+
+    asyncio.run(
+        bot_module.send_policy_notice(
+            SimpleNamespace(bot=fake_bot),
+            100,
+            SimpleNamespace(id=88, full_name="Alice"),
+            SimpleNamespace(reason="普通额度违规"),
+            decision,
+            60,
+        )
+    )
+
+    assert scheduled == [(100, 901, 300, "policy notice")]

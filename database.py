@@ -248,7 +248,7 @@ class Database:
         content_hash: str = "",
         now: Optional[datetime] = None,
     ) -> AdPolicyDecision:
-        """原子登记广告并返回 allow/temporary_mute/permanent_mute。
+        """原子登记广告并返回 allow/temporary_mute/duplicate_mute/permanent_mute。
 
         每个群、每个用户独立计算额度；同一群 60 分钟内完全相同的广告还会跨用户
         共享重复检测。SQLite 的 BEGIN IMMEDIATE 加进程内写锁，确保同时到达的两条
@@ -283,7 +283,7 @@ class Database:
                         """
                         SELECT COUNT(*) FROM detected_ads
                         WHERE chat_id=? AND user_id=? AND event_type='violation'
-                          AND detected_at>=?
+                          AND duplicate_content=0 AND detected_at>=?
                         """,
                         (chat_id, user_id, violation_start),
                     ).fetchone()[0]
@@ -296,9 +296,16 @@ class Database:
                         (chat_id, user_id),
                     ).fetchone()
                     conn.commit()
-                    action = "allow" if existing[0] == "allowed" else (
-                        "permanent_mute" if violations >= permanent_mute_after else "temporary_mute"
-                    )
+                    if existing[0] == "allowed":
+                        action = "allow"
+                    elif existing[1]:
+                        action = "duplicate_mute"
+                    else:
+                        action = (
+                            "permanent_mute"
+                            if violations >= permanent_mute_after
+                            else "temporary_mute"
+                        )
                     return AdPolicyDecision(
                         action=action,
                         violation_count=violations,
@@ -348,7 +355,7 @@ class Database:
                     """
                     SELECT COUNT(*) FROM detected_ads
                     WHERE chat_id=? AND user_id=? AND event_type='violation'
-                      AND detected_at>=?
+                      AND duplicate_content=0 AND detected_at>=?
                     """,
                     (chat_id, user_id, violation_start),
                 ).fetchone()[0]
@@ -367,7 +374,10 @@ class Database:
         if event_type == "allowed":
             return AdPolicyDecision("allow", violations, None, False)
 
-        action = "permanent_mute" if violations >= permanent_mute_after else "temporary_mute"
+        if is_duplicate_content:
+            action = "duplicate_mute"
+        else:
+            action = "permanent_mute" if violations >= permanent_mute_after else "temporary_mute"
         return AdPolicyDecision(
             action,
             violations,
@@ -402,7 +412,7 @@ class Database:
                 """
                 SELECT COUNT(*) FROM detected_ads
                 WHERE chat_id=? AND user_id=? AND event_type='violation'
-                  AND detected_at>=?
+                  AND duplicate_content=0 AND detected_at>=?
                 """,
                 (chat_id, user_id, violation_start),
             )

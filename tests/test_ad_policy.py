@@ -110,8 +110,8 @@ def test_identical_ad_is_group_wide_violation_even_from_another_user(tmp_path):
     )
 
     assert first.action == "allow"
-    assert repeated.action == "temporary_mute"
-    assert repeated.violation_count == 1
+    assert repeated.action == "duplicate_mute"
+    assert repeated.violation_count == 0
     assert repeated.is_duplicate_content is True
 
 
@@ -143,3 +143,38 @@ def test_identical_ad_is_allowed_again_after_rolling_hour(tmp_path):
     )
 
     assert later.is_allowed
+
+
+def test_duplicate_ads_never_count_toward_permanent_mute(tmp_path):
+    db = Database(tmp_path / "policy.db")
+
+    for offset, fingerprint in enumerate(("ad-a", "ad-b", "ad-c"), start=1):
+        register(db, offset * 10, BASE, user_id=100 + offset, content_hash=fingerprint)
+        duplicate = register(
+            db,
+            offset * 10 + 1,
+            BASE + timedelta(minutes=offset),
+            user_id=200,
+            content_hash=fingerprint,
+        )
+        assert duplicate.action == "duplicate_mute"
+        assert duplicate.violation_count == 0
+
+    first_unique = register(
+        db,
+        50,
+        BASE + timedelta(minutes=10),
+        user_id=200,
+        content_hash="unique-a",
+    )
+    normal_violation = register(
+        db,
+        51,
+        BASE + timedelta(minutes=11),
+        user_id=200,
+        content_hash="unique-b",
+    )
+
+    assert first_unique.is_allowed
+    assert normal_violation.action == "temporary_mute"
+    assert normal_violation.violation_count == 1

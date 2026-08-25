@@ -144,6 +144,7 @@ def policy_settings() -> dict:
         "violation_window": timedelta(days=int(config.get("policy.violation_window_days", 7))),
         "permanent_mute_after": int(config.get("policy.permanent_mute_after", 3)),
         "temporary_mute": timedelta(minutes=int(config.get("policy.temporary_mute_minutes", 60))),
+        "duplicate_mute": timedelta(hours=int(config.get("policy.duplicate_ad_mute_hours", 12))),
     }
 
 
@@ -300,18 +301,26 @@ async def send_policy_notice(context, chat_id: int, user, result, decision, temp
     safe_reason = html.escape(getattr(result, "reason", "") or "命中广告词")
     if decision.is_permanent:
         action_text = "永久禁言"
+    elif getattr(decision, "is_duplicate_content", False):
+        action_text = f"禁言 {temporary_minutes // 60} 小时"
     else:
         action_text = f"禁言 {temporary_minutes} 分钟"
 
+    is_duplicate = getattr(decision, "is_duplicate_content", False)
     violation_text = (
         "发送了本群 60 分钟内已经出现过的相同广告"
-        if getattr(decision, "is_duplicate_content", False)
+        if is_duplicate
         else "在广告额度内重复发广告"
+    )
+    count_text = (
+        "此类重复不计入永久禁言次数。\n"
+        if is_duplicate
+        else f"最近统计周期内违规：<b>{decision.violation_count}</b> 次。\n"
     )
     notice = (
         f'⚠️ <a href="tg://user?id={user.id}">{safe_name}</a> {violation_text}。\n'
         f"本条已删除，处理：<b>{action_text}</b>。\n"
-        f"最近统计周期内违规：<b>{decision.violation_count}</b> 次。\n"
+        f"{count_text}"
         f"识别原因：{safe_reason}"
     )
     if decision.is_permanent:
@@ -324,9 +333,13 @@ async def send_policy_notice(context, chat_id: int, user, result, decision, temp
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
-    if not decision.is_permanent:
-        delete_after = int(config.get("message.delete_policy_notice_after_seconds", 60))
-        schedule_message_deletion(context, chat_id, sent_message.message_id, delete_after, "policy notice")
+    delete_after = int(config.get(
+        "message.delete_permanent_mute_notice_after_seconds"
+        if decision.is_permanent
+        else "message.delete_policy_notice_after_seconds",
+        300 if decision.is_permanent else 60,
+    ))
+    schedule_message_deletion(context, chat_id, sent_message.message_id, delete_after, "policy notice")
 
 
 async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, message, result):
@@ -353,9 +366,14 @@ async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
     except Exception as exc:
         logger.warning("Failed to delete violating ad chat=%s message=%s: %s", chat_id, message.message_id, exc)
 
+    mute_duration = (
+        settings["duplicate_mute"]
+        if getattr(decision, "is_duplicate_content", False)
+        else settings["temporary_mute"]
+    )
     until_date = None
     if not decision.is_permanent:
-        until_date = datetime.now(timezone.utc) + settings["temporary_mute"]
+        until_date = datetime.now(timezone.utc) + mute_duration
 
     await context.bot.restrict_chat_member(
         chat_id=chat_id,
@@ -363,7 +381,7 @@ async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
         permissions=no_send_permissions(),
         until_date=until_date,
     )
-    temporary_minutes = int(settings["temporary_mute"].total_seconds() // 60)
+    temporary_minutes = int(mute_duration.total_seconds() // 60)
     await send_policy_notice(context, chat_id, user, result, decision, temporary_minutes)
     logger.info(
         "Ad violation enforced: chat=%s user=%s action=%s count=%s score=%s",
@@ -738,6 +756,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"本群屏蔽词：{len(db.list_blocked_words(chat_id))} 个\n"
         f"每人每 {config.get('policy.ad_interval_minutes', 60)} 分钟允许 1 条广告\n"
         f"超额后禁言：{config.get('policy.temporary_mute_minutes', 60)} 分钟\n"
+        f"相同广告重复：禁言 {config.get('policy.duplicate_ad_mute_hours', 12)} 小时，不计永久禁言次数\n"
         f"滚动 {config.get('policy.violation_window_days', 7)} 天内达到 "
         f"{config.get('policy.permanent_mute_after', 3)} 次：永久禁言\n\n"
         "管理员命令：\n"
@@ -1169,6 +1188,7 @@ def validate_config():
     numeric_policy = {
         "policy.ad_interval_minutes": config.get("policy.ad_interval_minutes", 60),
         "policy.temporary_mute_minutes": config.get("policy.temporary_mute_minutes", 60),
+        "policy.duplicate_ad_mute_hours": config.get("policy.duplicate_ad_mute_hours", 12),
         "policy.violation_window_days": config.get("policy.violation_window_days", 7),
         "policy.permanent_mute_after": config.get("policy.permanent_mute_after", 3),
     }
@@ -1267,10 +1287,11 @@ def main():
 
     logger.info("🚀 Bot 启动中...")
     logger.info(
-        "📊 广告策略: 模式=%s | 每%s分钟1条 | 超额禁言%s分钟 | %s天内%s次永久禁言",
+        "📊 广告策略: 模式=%s | 每%s分钟1条 | 超额禁言%s分钟 | 相同广告禁言%s小时 | %s天内%s次永久禁言",
         detection_mode(),
         config.get('policy.ad_interval_minutes', 60),
         config.get('policy.temporary_mute_minutes', 60),
+        config.get('policy.duplicate_ad_mute_hours', 12),
         config.get('policy.violation_window_days', 7),
         config.get('policy.permanent_mute_after', 3),
     )
