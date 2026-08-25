@@ -52,6 +52,9 @@ logging.basicConfig(
         logging.FileHandler('data/bot.log', encoding='utf-8')
     ]
 )
+# httpx 的 INFO 日志会输出包含 Bot Token 的 Telegram API URL。
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 stats = RuntimeStats()
