@@ -1,6 +1,6 @@
 # Telegram Ad Guard — customized build
 
-This build defaults to deterministic, per-group keyword moderation with no AI API required. Blocked words delete the message and permanently mute the sender; ad words use a one-per-user rolling-hour quota, a one-hour mute for over-quota ads, and a permanent mute on the third rolling-seven-day violation. Permanent mutes include an in-group appeal flow.
+This build defaults to deterministic, per-group keyword moderation with no AI API required. Blocked words delete the message and permanently mute the sender; ad words use a one-per-user rolling-hour quota, group-wide exact-ad deduplication, a one-hour mute for over-quota ads, and a permanent mute on the third rolling-seven-day violation. Permanent mutes include an in-group appeal flow.
 
 See [使用说明.md](使用说明.md) for the Chinese setup and group installation guide.
 
@@ -44,6 +44,7 @@ See [使用说明.md](使用说明.md) for the Chinese setup and group installat
 
 - 🛡️ **No-AI Keyword Mode**: Deterministic moderation without API cost or model errors
 - 📢 **Per-group Ad Words**: One matched ad per user per rolling hour
+- 🔁 **Exact Ad Deduplication**: A repeated identical ad is removed across users within the rolling hour
 - ⛔ **Per-group Blocked Words**: Immediate deletion and permanent mute
 - 📨 **Appeals**: Muted users can submit an in-group appeal for admin approval
 - 🔨 **Manual Moderation**: Admin `/mute` and `/unban` commands

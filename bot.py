@@ -13,6 +13,7 @@ AI 反垃圾广告机器人 (AI Anti-Spam Bot)
 """
 import asyncio
 import base64
+import hashlib
 import html
 import logging
 import sys
@@ -184,6 +185,12 @@ def current_message_body(message) -> str:
     return (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
 
 
+def ad_content_hash(message) -> str:
+    """为广告当前正文生成群级去重指纹，不在数据库中保存广告明文。"""
+    body = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest() if body else ""
+
+
 def permanent_mute_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📨 本人发起申诉", callback_data=f"appeal_{user_id}")],
@@ -296,8 +303,13 @@ async def send_policy_notice(context, chat_id: int, user, result, decision, temp
     else:
         action_text = f"禁言 {temporary_minutes} 分钟"
 
+    violation_text = (
+        "发送了本群 60 分钟内已经出现过的相同广告"
+        if getattr(decision, "is_duplicate_content", False)
+        else "在广告额度内重复发广告"
+    )
     notice = (
-        f'⚠️ <a href="tg://user?id={user.id}">{safe_name}</a> 在广告额度内重复发广告。\n'
+        f'⚠️ <a href="tg://user?id={user.id}">{safe_name}</a> {violation_text}。\n'
         f"本条已删除，处理：<b>{action_text}</b>。\n"
         f"最近统计周期内违规：<b>{decision.violation_count}</b> 次。\n"
         f"识别原因：{safe_reason}"
@@ -329,6 +341,7 @@ async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
         permanent_mute_after=settings["permanent_mute_after"],
         score=getattr(result, "score", 0),
         reason=getattr(result, "reason", ""),
+        content_hash=ad_content_hash(message),
     )
 
     if decision.is_allowed:

@@ -38,6 +38,7 @@ class AdPolicyDecision:
     action: str
     violation_count: int
     last_allowed_at: Optional[datetime]
+    is_duplicate_content: bool = False
 
     @property
     def is_allowed(self) -> bool:
@@ -125,12 +126,29 @@ class Database:
                     event_type TEXT NOT NULL CHECK(event_type IN ('allowed', 'violation')),
                     score INTEGER DEFAULT 0,
                     reason TEXT DEFAULT '',
+                    content_hash TEXT DEFAULT '',
+                    duplicate_content INTEGER DEFAULT 0,
                     UNIQUE(chat_id, message_id)
                 )
             """)
+            detected_ad_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(detected_ads)")
+            }
+            if "content_hash" not in detected_ad_columns:
+                conn.execute(
+                    "ALTER TABLE detected_ads ADD COLUMN content_hash TEXT DEFAULT ''"
+                )
+            if "duplicate_content" not in detected_ad_columns:
+                conn.execute(
+                    "ALTER TABLE detected_ads ADD COLUMN duplicate_content INTEGER DEFAULT 0"
+                )
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_detected_ads_user_time
                 ON detected_ads(chat_id, user_id, detected_at)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_detected_ads_content_time
+                ON detected_ads(chat_id, content_hash, detected_at)
             """)
 
             # 每个群独立的手动屏蔽词。normalized_word 用于大小写和全半角兼容匹配。
@@ -227,12 +245,14 @@ class Database:
         permanent_mute_after: int,
         score: int = 0,
         reason: str = "",
+        content_hash: str = "",
         now: Optional[datetime] = None,
     ) -> AdPolicyDecision:
         """原子登记广告并返回 allow/temporary_mute/permanent_mute。
 
-        每个群、每个用户独立计算。SQLite 的 BEGIN IMMEDIATE 加进程内写锁，确保
-        同时到达的两条广告最多只有一条能获得额度。
+        每个群、每个用户独立计算额度；同一群 60 分钟内完全相同的广告还会跨用户
+        共享重复检测。SQLite 的 BEGIN IMMEDIATE 加进程内写锁，确保同时到达的两条
+        广告最多只有一条能获得额度。
         """
         if ad_interval.total_seconds() <= 0:
             raise ValueError("ad_interval must be positive")
@@ -253,7 +273,7 @@ class Database:
                 # 编辑消息或 Telegram 重投同一个 update 时保持幂等。
                 existing = conn.execute(
                     """
-                    SELECT event_type FROM detected_ads
+                    SELECT event_type, duplicate_content FROM detected_ads
                     WHERE chat_id=? AND message_id=?
                     """,
                     (chat_id, message_id),
@@ -285,6 +305,7 @@ class Database:
                         last_allowed_at=(
                             datetime.fromtimestamp(last_row[0], timezone.utc) if last_row else None
                         ),
+                        is_duplicate_content=bool(existing[1]),
                     )
 
                 last_row = conn.execute(
@@ -297,14 +318,30 @@ class Database:
                     (chat_id, user_id, quota_start),
                 ).fetchone()
 
-                event_type = "violation" if last_row else "allowed"
+                duplicate_row = None
+                if content_hash:
+                    duplicate_row = conn.execute(
+                        """
+                        SELECT detected_at FROM detected_ads
+                        WHERE chat_id=? AND content_hash=? AND detected_at>?
+                        ORDER BY detected_at DESC LIMIT 1
+                        """,
+                        (chat_id, content_hash, quota_start),
+                    ).fetchone()
+
+                is_duplicate_content = duplicate_row is not None
+                event_type = "violation" if last_row or duplicate_row else "allowed"
                 conn.execute(
                     """
                     INSERT INTO detected_ads
-                        (chat_id, user_id, message_id, detected_at, event_type, score, reason)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (chat_id, user_id, message_id, detected_at, event_type, score, reason,
+                         content_hash, duplicate_content)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (chat_id, user_id, message_id, now_ts, event_type, score, reason),
+                    (
+                        chat_id, user_id, message_id, now_ts, event_type, score, reason,
+                        content_hash, int(is_duplicate_content),
+                    ),
                 )
 
                 violations = conn.execute(
@@ -328,13 +365,14 @@ class Database:
                 raise
 
         if event_type == "allowed":
-            return AdPolicyDecision("allow", violations, None)
+            return AdPolicyDecision("allow", violations, None, False)
 
         action = "permanent_mute" if violations >= permanent_mute_after else "temporary_mute"
         return AdPolicyDecision(
             action,
             violations,
-            datetime.fromtimestamp(last_row[0], timezone.utc),
+            datetime.fromtimestamp((last_row or duplicate_row)[0], timezone.utc),
+            is_duplicate_content,
         )
 
     def get_ad_policy_status(

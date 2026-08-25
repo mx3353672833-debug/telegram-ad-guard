@@ -9,7 +9,7 @@ HOUR = timedelta(hours=1)
 WEEK = timedelta(days=7)
 
 
-def register(db, message_id, now, *, chat_id=100, user_id=200):
+def register(db, message_id, now, *, chat_id=100, user_id=200, content_hash=""):
     return db.register_detected_ad(
         chat_id=chat_id,
         user_id=user_id,
@@ -19,6 +19,7 @@ def register(db, message_id, now, *, chat_id=100, user_id=200):
         permanent_mute_after=3,
         score=95,
         reason="promotion",
+        content_hash=content_hash,
         now=now,
     )
 
@@ -95,3 +96,50 @@ def test_concurrent_ads_only_consume_one_quota(tmp_path):
 
     assert sorted(result.action for result in results) == ["allow", "temporary_mute"]
 
+
+def test_identical_ad_is_group_wide_violation_even_from_another_user(tmp_path):
+    db = Database(tmp_path / "policy.db")
+
+    first = register(db, 1, BASE, user_id=200, content_hash="same-ad")
+    repeated = register(
+        db,
+        2,
+        BASE + timedelta(minutes=10),
+        user_id=201,
+        content_hash="same-ad",
+    )
+
+    assert first.action == "allow"
+    assert repeated.action == "temporary_mute"
+    assert repeated.violation_count == 1
+    assert repeated.is_duplicate_content is True
+
+
+def test_different_ad_text_does_not_consume_another_users_quota(tmp_path):
+    db = Database(tmp_path / "policy.db")
+
+    assert register(db, 1, BASE, user_id=200, content_hash="ad-a").is_allowed
+    second_user = register(
+        db,
+        2,
+        BASE + timedelta(minutes=10),
+        user_id=201,
+        content_hash="ad-b",
+    )
+
+    assert second_user.is_allowed
+
+
+def test_identical_ad_is_allowed_again_after_rolling_hour(tmp_path):
+    db = Database(tmp_path / "policy.db")
+
+    assert register(db, 1, BASE, user_id=200, content_hash="same-ad").is_allowed
+    later = register(
+        db,
+        2,
+        BASE + timedelta(hours=1, seconds=1),
+        user_id=201,
+        content_hash="same-ad",
+    )
+
+    assert later.is_allowed
