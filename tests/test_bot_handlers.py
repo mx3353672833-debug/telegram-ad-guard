@@ -68,6 +68,8 @@ class FakeDB:
         self.ad_word_match = None
         self.blocked_words = {}
         self.ad_words = {}
+        self.fingerprint_duplicate = False
+        self.fingerprint_calls = []
 
     def get_user(self, user_id, chat_id):
         return self.user
@@ -91,6 +93,14 @@ class FakeDB:
 
     def find_ad_word(self, chat_id, text):
         return self.ad_word_match
+
+    @staticmethod
+    def normalize_blocked_text(text):
+        return str(text or "").casefold().strip()
+
+    def register_message_fingerprint(self, **kwargs):
+        self.fingerprint_calls.append(kwargs)
+        return self.fingerprint_duplicate
 
     def add_blocked_word(self, chat_id, word, created_by):
         words = self.blocked_words.setdefault(chat_id, [])
@@ -524,6 +534,59 @@ def test_ad_word_uses_hourly_ad_policy_without_ai(bot_module, monkeypatch):
     assert captured[0].score == 100
     assert "源头" in captured[0].reason
     assert stats_calls == ["passed"]
+
+
+def test_repeated_long_text_is_moderated_without_matching_adword(bot_module, monkeypatch):
+    fake_db = FakeDB()
+    fake_db.fingerprint_duplicate = True
+    monkeypatch.setattr(bot_module, "db", fake_db)
+    stats_calls = []
+    monkeypatch.setattr(bot_module, "stats", SimpleNamespace(record_check=stats_calls.append))
+    captured = []
+
+    async def fake_policy(context, chat_id, user, message, result, *, force_duplicate=False):
+        captured.append((result, force_duplicate))
+        return "duplicate_mute"
+
+    monkeypatch.setattr(bot_module, "apply_ad_policy", fake_policy)
+    message = FakeMessage(chat_id=100)
+    message.from_user = SimpleNamespace(id=10, full_name="Repeater")
+    message.text = "自动加群，自动群发，一个人管理多个TG号，免费试用"
+
+    action = asyncio.run(
+        bot_module.apply_word_rules(
+            SimpleNamespace(bot=FakeBot()),
+            100,
+            message.from_user,
+            message,
+        )
+    )
+
+    assert action == "duplicate_mute"
+    assert captured[0][1] is True
+    assert "完全相同" in captured[0][0].reason
+    assert stats_calls == ["banned"]
+
+
+def test_short_repeated_text_is_not_fingerprinted(bot_module, monkeypatch):
+    fake_db = FakeDB()
+    fake_db.fingerprint_duplicate = True
+    monkeypatch.setattr(bot_module, "db", fake_db)
+    message = FakeMessage(chat_id=100)
+    message.from_user = SimpleNamespace(id=10, full_name="Member")
+    message.text = "谢谢老板"
+
+    action = asyncio.run(
+        bot_module.apply_word_rules(
+            SimpleNamespace(bot=FakeBot()),
+            100,
+            message.from_user,
+            message,
+        )
+    )
+
+    assert action is None
+    assert fake_db.fingerprint_calls == []
 
 
 def test_adword_commands_are_scoped_to_current_group(bot_module, monkeypatch):

@@ -77,7 +77,12 @@ def test_existing_database_is_migrated_for_duplicate_ad_detection(tmp_path):
     conn = sqlite3.connect(db_path)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(detected_ads)")}
     indexes = {row[1] for row in conn.execute("PRAGMA index_list(detected_ads)")}
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
     conn.close()
 
     assert {"content_hash", "duplicate_content"} <= columns
     assert "idx_detected_ads_content_time" in indexes
+    assert "message_fingerprints" in tables

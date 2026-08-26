@@ -151,6 +151,23 @@ class Database:
                 ON detected_ads(chat_id, content_hash, detected_at)
             """)
 
+            # 记录较长群消息的全文指纹，让未命中广告词的复制群发也能被发现。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS message_fingerprints (
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    observed_at INTEGER NOT NULL,
+                    duplicate_content INTEGER DEFAULT 0,
+                    PRIMARY KEY (chat_id, message_id)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_message_fingerprints_content_time
+                ON message_fingerprints(chat_id, content_hash, observed_at)
+            """)
+
             # 每个群独立的手动屏蔽词。normalized_word 用于大小写和全半角兼容匹配。
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS blocked_words (
@@ -246,6 +263,7 @@ class Database:
         score: int = 0,
         reason: str = "",
         content_hash: str = "",
+        force_duplicate: bool = False,
         now: Optional[datetime] = None,
     ) -> AdPolicyDecision:
         """原子登记广告并返回 allow/temporary_mute/duplicate_mute/permanent_mute。
@@ -336,8 +354,8 @@ class Database:
                         (chat_id, content_hash, quota_start),
                     ).fetchone()
 
-                is_duplicate_content = duplicate_row is not None
-                event_type = "violation" if last_row or duplicate_row else "allowed"
+                is_duplicate_content = force_duplicate or duplicate_row is not None
+                event_type = "violation" if last_row or is_duplicate_content else "allowed"
                 conn.execute(
                     """
                     INSERT INTO detected_ads
@@ -378,12 +396,78 @@ class Database:
             action = "duplicate_mute"
         else:
             action = "permanent_mute" if violations >= permanent_mute_after else "temporary_mute"
+        prior_trigger = last_row or duplicate_row
         return AdPolicyDecision(
             action,
             violations,
-            datetime.fromtimestamp((last_row or duplicate_row)[0], timezone.utc),
+            (
+                datetime.fromtimestamp(prior_trigger[0], timezone.utc)
+                if prior_trigger
+                else None
+            ),
             is_duplicate_content,
         )
+
+    def register_message_fingerprint(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        message_id: int,
+        content_hash: str,
+        duplicate_window: timedelta,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """登记普通长文本指纹，返回该内容是否在本群窗口内已经出现。"""
+        if not content_hash:
+            raise ValueError("content_hash cannot be empty")
+        if duplicate_window.total_seconds() <= 0:
+            raise ValueError("duplicate_window must be positive")
+
+        now_ts = self._utc_timestamp(now)
+        window_start = now_ts - int(duplicate_window.total_seconds())
+
+        with self._write_lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    """
+                    SELECT duplicate_content FROM message_fingerprints
+                    WHERE chat_id=? AND message_id=?
+                    """,
+                    (chat_id, message_id),
+                ).fetchone()
+                if existing:
+                    conn.commit()
+                    return bool(existing[0])
+
+                duplicate = conn.execute(
+                    """
+                    SELECT 1 FROM message_fingerprints
+                    WHERE chat_id=? AND content_hash=? AND observed_at>?
+                    LIMIT 1
+                    """,
+                    (chat_id, content_hash, window_start),
+                ).fetchone() is not None
+                conn.execute(
+                    """
+                    INSERT INTO message_fingerprints
+                        (chat_id, message_id, user_id, content_hash, observed_at,
+                         duplicate_content)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (chat_id, message_id, user_id, content_hash, now_ts, int(duplicate)),
+                )
+                conn.execute(
+                    "DELETE FROM message_fingerprints WHERE observed_at<?",
+                    (now_ts - int(duplicate_window.total_seconds()) * 2,),
+                )
+                conn.commit()
+                return duplicate
+            except Exception:
+                conn.rollback()
+                raise
 
     def get_ad_policy_status(
         self,

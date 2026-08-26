@@ -9,7 +9,16 @@ HOUR = timedelta(hours=1)
 WEEK = timedelta(days=7)
 
 
-def register(db, message_id, now, *, chat_id=100, user_id=200, content_hash=""):
+def register(
+    db,
+    message_id,
+    now,
+    *,
+    chat_id=100,
+    user_id=200,
+    content_hash="",
+    force_duplicate=False,
+):
     return db.register_detected_ad(
         chat_id=chat_id,
         user_id=user_id,
@@ -20,6 +29,7 @@ def register(db, message_id, now, *, chat_id=100, user_id=200, content_hash=""):
         score=95,
         reason="promotion",
         content_hash=content_hash,
+        force_duplicate=force_duplicate,
         now=now,
     )
 
@@ -178,3 +188,53 @@ def test_duplicate_ads_never_count_toward_permanent_mute(tmp_path):
     assert first_unique.is_allowed
     assert normal_violation.action == "temporary_mute"
     assert normal_violation.violation_count == 1
+
+
+def test_forced_duplicate_mutes_without_an_adword_history(tmp_path):
+    db = Database(tmp_path / "policy.db")
+
+    decision = register(
+        db,
+        1,
+        BASE,
+        user_id=200,
+        content_hash="unclassified-copy",
+        force_duplicate=True,
+    )
+
+    assert decision.action == "duplicate_mute"
+    assert decision.is_duplicate_content is True
+    assert decision.violation_count == 0
+
+
+def test_long_message_fingerprints_detect_group_wide_copies(tmp_path):
+    db = Database(tmp_path / "policy.db")
+
+    first = db.register_message_fingerprint(
+        chat_id=100,
+        user_id=200,
+        message_id=1,
+        content_hash="same-long-message",
+        duplicate_window=HOUR,
+        now=BASE,
+    )
+    second = db.register_message_fingerprint(
+        chat_id=100,
+        user_id=201,
+        message_id=2,
+        content_hash="same-long-message",
+        duplicate_window=HOUR,
+        now=BASE + timedelta(minutes=20),
+    )
+    after_window = db.register_message_fingerprint(
+        chat_id=100,
+        user_id=202,
+        message_id=3,
+        content_hash="same-long-message",
+        duplicate_window=HOUR,
+        now=BASE + timedelta(hours=2),
+    )
+
+    assert first is False
+    assert second is True
+    assert after_window is False

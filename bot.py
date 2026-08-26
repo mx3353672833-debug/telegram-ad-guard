@@ -342,7 +342,15 @@ async def send_policy_notice(context, chat_id: int, user, result, decision, temp
     schedule_message_deletion(context, chat_id, sent_message.message_id, delete_after, "policy notice")
 
 
-async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, message, result):
+async def apply_ad_policy(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user,
+    message,
+    result,
+    *,
+    force_duplicate: bool = False,
+):
     """对已确认的广告执行一小时额度及滚动七天处罚。"""
     settings = policy_settings()
     decision = db.register_detected_ad(
@@ -355,6 +363,7 @@ async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
         score=getattr(result, "score", 0),
         reason=getattr(result, "reason", ""),
         content_hash=ad_content_hash(message),
+        force_duplicate=force_duplicate,
     )
 
     if decision.is_allowed:
@@ -391,7 +400,7 @@ async def apply_ad_policy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
 
 
 async def apply_word_rules(context, chat_id: int, user, message):
-    """按屏蔽词 > 广告词的优先级处理当前消息。"""
+    """按屏蔽词 > 长文本重复 > 广告词的组合规则处理当前消息。"""
     body = current_message_body(message)
     if not body:
         return None
@@ -402,6 +411,19 @@ async def apply_word_rules(context, chat_id: int, user, message):
         stats.record_check("banned")
         return "blocked_permanent_mute"
 
+    settings = policy_settings()
+    minimum_length = int(config.get("policy.duplicate_text_min_length", 12))
+    compact_body = "".join(db.normalize_blocked_text(body).split())
+    repeated_long_text = False
+    if len(compact_body) >= minimum_length:
+        repeated_long_text = db.register_message_fingerprint(
+            chat_id=chat_id,
+            user_id=user.id,
+            message_id=message.message_id,
+            content_hash=ad_content_hash(message),
+            duplicate_window=settings["ad_interval"],
+        )
+
     ad_word = db.find_ad_word(chat_id, body)
     if ad_word:
         result = SimpleNamespace(
@@ -410,8 +432,36 @@ async def apply_word_rules(context, chat_id: int, user, message):
             reason=f"命中本群广告词：{ad_word}",
             mock_text="",
         )
-        action = await apply_ad_policy(context, chat_id, user, message, result)
+        if repeated_long_text:
+            action = await apply_ad_policy(
+                context,
+                chat_id,
+                user,
+                message,
+                result,
+                force_duplicate=True,
+            )
+        else:
+            action = await apply_ad_policy(context, chat_id, user, message, result)
         stats.record_check("passed" if action == "allowed_ad" else "banned")
+        return action
+
+    if repeated_long_text:
+        result = SimpleNamespace(
+            is_spam=True,
+            score=100,
+            reason="本群 60 分钟内出现完全相同的长文本",
+            mock_text="",
+        )
+        action = await apply_ad_policy(
+            context,
+            chat_id,
+            user,
+            message,
+            result,
+            force_duplicate=True,
+        )
+        stats.record_check("banned")
         return action
 
     return None
@@ -757,6 +807,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"每人每 {config.get('policy.ad_interval_minutes', 60)} 分钟允许 1 条广告\n"
         f"超额后禁言：{config.get('policy.temporary_mute_minutes', 60)} 分钟\n"
         f"相同广告重复：禁言 {config.get('policy.duplicate_ad_mute_hours', 12)} 小时，不计永久禁言次数\n"
+        f"未命中广告词的相同长文本：满 {config.get('policy.duplicate_text_min_length', 12)} 字也参与去重\n"
         f"滚动 {config.get('policy.violation_window_days', 7)} 天内达到 "
         f"{config.get('policy.permanent_mute_after', 3)} 次：永久禁言\n\n"
         "管理员命令：\n"
@@ -1189,6 +1240,7 @@ def validate_config():
         "policy.ad_interval_minutes": config.get("policy.ad_interval_minutes", 60),
         "policy.temporary_mute_minutes": config.get("policy.temporary_mute_minutes", 60),
         "policy.duplicate_ad_mute_hours": config.get("policy.duplicate_ad_mute_hours", 12),
+        "policy.duplicate_text_min_length": config.get("policy.duplicate_text_min_length", 12),
         "policy.violation_window_days": config.get("policy.violation_window_days", 7),
         "policy.permanent_mute_after": config.get("policy.permanent_mute_after", 3),
     }
